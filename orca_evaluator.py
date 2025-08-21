@@ -30,8 +30,8 @@ from habitat_baselines.utils.common import (
 from habitat_baselines.utils.info_dict import extract_scalars_from_info
 
 # 添加数据保存相关的配置
-VIDEO_DIR = '/hpc2hdd/home/yfan546/workplace/amap_ws/Falcon-main/data/video_orca1'
-DATA_DIR = '/hpc2hdd/home/yfan546/workplace/amap_ws/Falcon-main/data/orca_data1'
+VIDEO_DIR = '/hpc2hdd/home/yfan546/workplace/amap_ws/Falcon-main/data/video_orca3'
+DATA_DIR = '/hpc2hdd/home/yfan546/workplace/amap_ws/Falcon-main/data/orca_data3'
 
 
 class ORCAEvaluator(Evaluator):
@@ -50,8 +50,8 @@ class ORCAEvaluator(Evaluator):
     # -----------------------------
     # 数据处理和保存相关的辅助方法
     # -----------------------------
-    def _process_depth_observation(self, obs_dict):
-        """处理深度观测数据"""
+    def _process_depth_observation_for_video(self, obs_dict):
+        """仅为视频生成处理深度观测数据，不影响原始数据保存"""
         processed_obs = obs_dict.copy()
         depth_key = "agent_0_articulated_agent_jaw_depth"
         if depth_key in processed_obs:
@@ -114,8 +114,78 @@ class ORCAEvaluator(Evaluator):
             except OSError as e:
                 print(f"Failed to rename directory {old_dir_path} to {new_dir_path}: {e}")
 
+    def _save_raw_images_before_transforms(self, batch, current_episodes_info, ep_eval_count, step_data, step_counter):
+        """在apply_obs_transforms_batch之前保存原始图像"""
+        for i in range(len(current_episodes_info)):
+            episode_key = self._get_episode_key(current_episodes_info[i], ep_eval_count)
+            
+            scene_id, episode_id, eval_count = episode_key
+            episode_dir_name = self._get_episode_dir_name(scene_id, episode_id, eval_count)
+            episode_dir = os.path.join(DATA_DIR, episode_dir_name)
+            os.makedirs(episode_dir, exist_ok=True)
+
+            # 获取动作名称
+            if step_data is not None and i < len(step_data):
+                action_value = step_data[i]
+            else:
+                action_value = 0  # 初始步骤
+            action_name = self._get_action_mapping(action_value)
+            
+            # 使用全局步骤计数器
+            step_str = f"{step_counter:03d}"
+            
+            # 获取当前环境的观测数据
+            env_obs = {k: v[i] for k, v in batch.items()}
+
+            # 保存RGB图像
+            rgb_key = "agent_0_articulated_agent_jaw_rgb"
+            if rgb_key in env_obs:
+                rgb_image = env_obs[rgb_key]
+                if torch.is_tensor(rgb_image):
+                    rgb_image = rgb_image.cpu().numpy()
+                
+                # 确保数据格式正确
+                if rgb_image.dtype != np.uint8:
+                    if rgb_image.max() <= 1.0:  # 如果是0-1范围
+                        rgb_image = (rgb_image * 255).astype(np.uint8)
+                    else:
+                        rgb_image = rgb_image.astype(np.uint8)
+                
+                rgb_filename = f"{step_str}_{action_name}_FrontView.png"
+                rgb_path = os.path.join(episode_dir, rgb_filename)
+                cv2.imwrite(rgb_path, cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))
+
+            # 保存深度图像（原始深度值转换为可视化PNG）
+            depth_key = "agent_0_articulated_agent_jaw_depth"
+            if depth_key in env_obs:
+                depth_image = env_obs[depth_key]
+                if torch.is_tensor(depth_image):
+                    depth_image = depth_image.cpu().numpy()
+                
+                # 保存原始深度数据为numpy文件
+                depth_raw_filename = f"{step_str}_{action_name}_FrontView_depth_raw.npy"
+                depth_raw_path = os.path.join(episode_dir, depth_raw_filename)
+                np.save(depth_raw_path, depth_image)
+                
+                # 同时保存深度的PNG可视化版本
+                # 将深度值转换为可视化的图像
+                depth_vis = depth_image.copy()
+                # 处理无效值
+                depth_vis = np.nan_to_num(depth_vis, nan=0.0, posinf=10.0, neginf=0.0)
+                # 裁剪到合理范围
+                depth_vis = np.clip(depth_vis, 0, 10.0)
+                # 归一化到0-255
+                if depth_vis.max() > 0:
+                    depth_vis = (depth_vis / depth_vis.max() * 255).astype(np.uint8)
+                else:
+                    depth_vis = depth_vis.astype(np.uint8)
+                
+                depth_filename = f"{step_str}_{action_name}_FrontView_depth.png"
+                depth_path = os.path.join(episode_dir, depth_filename)
+                cv2.imwrite(depth_path, depth_vis)
+
     def _save_images(self, episode_key, step_idx, batch, env_idx, action_value):
-        """保存RGB和深度图像"""
+        """保存RGB和深度图像，使用原始未处理的观测数据"""
         scene_id, episode_id, eval_count = episode_key
         episode_dir_name = self._get_episode_dir_name(scene_id, episode_id, eval_count)
         episode_dir = os.path.join(DATA_DIR, episode_dir_name)
@@ -137,24 +207,17 @@ class ORCAEvaluator(Evaluator):
             rgb_path = os.path.join(episode_dir, rgb_filename)
             cv2.imwrite(rgb_path, cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))
 
-        # 保存深度图像 - 修改：不进行归一化，直接保存原始值
+        # 保存深度图像 - 完全不做任何处理，直接保存原始depth
         depth_key = "agent_0_articulated_agent_jaw_depth"
         if depth_key in env_obs:
             depth_image = env_obs[depth_key]
             if torch.is_tensor(depth_image):
                 depth_image = depth_image.cpu().numpy()
             
-            # 直接保存原始深度值，不进行归一化
-            depth_filename = f"{step_str}_{action_name}_FrontView_depth.png"
+            # 不做任何处理，直接保存原始深度数据
+            depth_filename = f"{step_str}_{action_name}_FrontView_depth.npy"
             depth_path = os.path.join(episode_dir, depth_filename)
-            
-            # 如果需要保存为16位PNG以保持更高精度
-            if depth_image.dtype != np.uint16:
-                # 将深度值转换为uint16格式，可以保存更大的深度范围
-                depth_image_uint16 = (depth_image * 1000).astype(np.uint16)  # 乘以1000保持毫米精度
-                cv2.imwrite(depth_path, depth_image_uint16)
-            else:
-                cv2.imwrite(depth_path, depth_image)
+            np.save(depth_path, depth_image)
 
     def _get_point_goal_info(self, batch, env_idx):
         """获取点目标信息"""
@@ -237,9 +300,19 @@ class ORCAEvaluator(Evaluator):
         rank0_keys,
     ):
         success_cal = 0 ## my added
+        # 添加全局步骤计数器
+        global_step_counter = 0
+        
         observations = envs.reset()
         observations = envs.post_step(observations)
         batch = batch_obs(observations, device=device)
+        
+        # 在apply_obs_transforms_batch之前保存原始图像
+        current_episodes_info = envs.current_episodes()
+        ep_eval_count: Dict[Any, int] = defaultdict(lambda: 0)
+        self._save_raw_images_before_transforms(batch, current_episodes_info, ep_eval_count, None, global_step_counter)
+        global_step_counter += 1
+        
         batch = apply_obs_transforms_batch(batch, obs_transforms)  # type: ignore
 
         action_shape, discrete_actions = get_action_space_info(
@@ -274,7 +347,6 @@ class ORCAEvaluator(Evaluator):
         stats_episodes: Dict[
             Any, Any
         ] = {}  # dict of dicts that stores stats per episode
-        ep_eval_count: Dict[Any, int] = defaultdict(lambda: 0)
 
         # 初始化视频帧记录（支持VLA格式）
         if len(config.habitat_baselines.eval.video_option) > 0:
@@ -282,7 +354,8 @@ class ORCAEvaluator(Evaluator):
             vla_frames: List[List[np.ndarray]] = []
             for env_idx in range(config.habitat_baselines.num_environments):
                 env_obs = {k: v[env_idx] for k, v in batch.items()}
-                processed_obs = self._process_depth_observation(env_obs)
+                # 只在生成视频时才处理深度数据
+                processed_obs = self._process_depth_observation_for_video(env_obs)
                 frame = observations_to_image(processed_obs, {})
                 frame_vla = observations_to_image_vla(processed_obs, {})
                 rgb_frames.append([frame])
@@ -323,7 +396,6 @@ class ORCAEvaluator(Evaluator):
         os.makedirs(DATA_DIR, exist_ok=True)
 
         # 初始化当前episode的数据收集
-        current_episodes_info = envs.current_episodes()
         for i in range(envs.num_envs):
             self._initialize_episode_data(current_episodes_info[i], ep_eval_count, batch, i)
 
@@ -413,6 +485,11 @@ class ORCAEvaluator(Evaluator):
                 observations,
                 device=device,
             )
+            
+            # 在apply_obs_transforms_batch之前保存原始图像
+            self._save_raw_images_before_transforms(batch, current_episodes_info, ep_eval_count, step_data, global_step_counter)
+            global_step_counter += 1
+            
             batch = apply_obs_transforms_batch(batch, obs_transforms)  # type: ignore
 
             not_done_masks = torch.tensor(
@@ -429,11 +506,10 @@ class ORCAEvaluator(Evaluator):
             envs_to_pause = []
             n_envs = envs.num_envs
 
-            # 保存step后的图像和点目标信息
+            # 保存step后的点目标信息
             for i in range(n_envs):
                 episode_key = self._get_episode_key(current_episodes_info[i], ep_eval_count)
                 if episode_key in self.episode_data:
-                    self._save_images(episode_key, self.episode_step_count[episode_key], batch, i, step_data[i])
                     point_goal_info = self._get_point_goal_info(batch, i)
                     self.episode_data[episode_key]["point_goals"].append(point_goal_info)
 
@@ -455,9 +531,9 @@ class ORCAEvaluator(Evaluator):
                 }
 
                 if len(config.habitat_baselines.eval.video_option) > 0:
-                    # 处理观测数据并生成视频帧
+                    # 处理观测数据并生成视频帧 - 只在这里处理深度用于视频
                     env_obs = {k: v[i] for k, v in batch.items()}
-                    processed_obs = self._process_depth_observation(env_obs)
+                    processed_obs = self._process_depth_observation_for_video(env_obs)
                     frame = observations_to_image(processed_obs, disp_info)
                     vla_frame = observations_to_image_vla(processed_obs, disp_info)
 
@@ -465,7 +541,7 @@ class ORCAEvaluator(Evaluator):
                         # The last frame corresponds to the first frame of the next episode
                         # but the info is correct. So we use a black frame
                         final_obs = {k: v[i] * 0.0 for k, v in batch.items()}
-                        final_processed = self._process_depth_observation(final_obs)
+                        final_processed = self._process_depth_observation_for_video(final_obs)
                         final_frame = observations_to_image(final_processed, disp_info)
                         final_frame = overlay_frame(final_frame, disp_info)
                         final_vla_frame = observations_to_image_vla(final_processed, disp_info)
